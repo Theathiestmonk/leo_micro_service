@@ -1,0 +1,83 @@
+{
+  "templates": {
+    "did_you_know": {
+      "name": "Did You Know",
+      "description": "Educational and engaging fact-based template",
+      "prompt": "You are a social media content transformer. Your task is to read the following post: {post_content}. Identify the most compelling benefit, surprising fact, or key insight from the post. Rewrite it into a short, inspiring statement that fits the 'Did you know?' template.\n\nOutput format:\nDid you know? {single, clear, engaging fact written in plain language}.\n\nGuidelines:\n\nKeep it to 1–2 sentences only.\n\nMake it motivational, friendly, and easy to understand.\n\nAvoid technical jargon, long explanations, or promotional tone.\n\nFocus on how it helps or impacts the reader.\n\nDo not include hashtags, emojis, or links.",
+      "skip_template_analyzer": true,
+      "created_at": "2024-01-15T10:00:00Z",
+      "updated_at": "2024-01-15T10:00:00Z",
+      "created_by": "team"
+    },
+    "motivational_quote": {
+      "name": "Motivational Quote",
+      "description": "Inspirational quote template for motivation",
+      "prompt": "You are a motivational content creator. Transform the following post: {post_content} into an inspiring, uplifting message that fits a motivational quote template.\n\nOutput format:\n\"{inspiring quote or message}\"\n- {author or source}\n\nGuidelines:\n\nKeep it concise and powerful (1-2 sentences).\n\nMake it universally relatable and inspiring.\n\nUse positive, empowering language.\n\nFocus on growth, success, or overcoming challenges.\n\nAvoid clichés and generic phrases.",
+      "skip_template_analyzer": true,
+      "created_at": "2024-01-15T10:05:00Z",
+      "updated_at": "2024-01-15T10:05:00Z",
+      "created_by": "team"
+    },
+    "tips_and_tricks": {
+      "name": "Tips and Tricks",
+      "description": "Helpful tips and practical advice template",
+      "prompt": "You are a helpful content creator. Transform the following post: {post_content} into a practical tip or trick that readers can immediately apply.\n\nOutput format:\n💡 Pro Tip: {practical advice or tip}\n\nGuidelines:\n\nMake it actionable and specific.\n\nKeep it simple and easy to follow.\n\nFocus on immediate value for the reader.\n\nUse clear, step-by-step language when possible.\n\nAvoid overly complex explanations.",
+      "skip_template_analyzer": true,
+      "created_at": "2024-01-15T10:10:00Z",
+      "updated_at": "2024-01-15T10:10:00Z",
+      "created_by": "team"
+    },
+    "behind_the_scenes": {
+      "name": "Behind the Scenes",
+      "description": "Behind the scenes or process reveal template",
+      "prompt": "You are a content creator sharing behind-the-scenes insights. Transform the following post: {post_content} into an engaging behind-the-scenes story or process reveal.\n\nOutput format:\nBehind the scenes: {interesting process, story, or insight}\n\nGuidelines:\n\nMake it personal and authentic.\n\nShare something surprising or unexpected.\n\nKeep it relatable and engaging.\n\nFocus on the human element or process.\n\nAvoid revealing sensitive information.",
+      "skip_template_analyzer": true,
+      "created_at": "2024-01-15T10:15:00Z",
+      "updated_at": "2024-01-15T10:15:00Z",
+      "created_by": "team"
+    },
+    "new_product": {
+      "name": "New Product",
+      "description": "Curiosity-driven product launch teaser template",
+      "prompt": "You are a social media content transformer.\nYour task is to read the following post: {post_content}.\nThe post may be a full announcement, introduction, or detailed description of a new product or service.\nIdentify what is being launched and the most appealing benefit, emotion, or unique element behind it.\nRewrite it into a short, curiosity-driven teaser that fits the 'Product Launch' template.\n\nOutput format:\n{Curiosity opener like \"Pssst…\", \"Guess what?\", or \"Shhh…\"}\n{Rewritten version of \"Something new is coming\" that matches the product's theme, e.g., \"Something intelligent is coming\", \"Something powerful is on the way\", etc.}\n{Optional 1-line tagline revealing the product name or hinting at what it does.}\n\nGuidelines:\n\nKeep it short, mysterious, and exciting (2–3 lines max).\n\nMaintain a tone of curiosity and anticipation — don't fully reveal the product details.\n\nPreserve the product launch essence — it should clearly feel like a \"coming soon\" teaser.\n\nUse simple, modern, human language.\n\nAvoid hashtags, emojis, or promotional fluff.\n\nFocus on building curiosity while subtly showing what makes the product interesting or valuable.",
+      "skip_template_analyzer": true,
+      "created_at": "2024-01-15T10:20:00Z",
+      "updated_at": "2024-01-15T10:20:00Z",
+      "created_by": "team"
+    },
+    "success_story": {
+      "name": "Success Story",
+      "description": "Customer success story or case study template",
+      "prompt": "You are a content creator specializing in success stories. Transform the following post: {post_content} into an inspiring success story that showcases results and achievements.\n\nOutput format:\n🎉 Success Story: {achievement or result}\n\n{story details}\n\nKey takeaway: {main lesson or insight}\n\nGuidelines:\n\nFocus on specific, measurable results.\n\nMake it relatable and inspiring.\n\nInclude concrete details and numbers when possible.\n\nHighlight the journey and transformation.\n\nKeep it authentic and genuine.",
+      "skip_template_analyzer": true,
+      "created_at": "2024-01-15T10:20:00Z",
+      "updated_at": "2024-01-15T10:20:00Z",
+      "created_by": "team"
+    },
+    
+    "school_1": {
+      "name": "School 1",
+      "description": "School admission advertisement template for visual content transformation",
+      "prompt": "You are a visual content transformer for social media creatives. Your task is to read and understand the provided image of a school admission advertisement. The image may include text such as school name, contact info, admission details, key benefits, tagline, and address. Analyze the user's input instructions carefully and update the image accordingly — for example, changing text, replacing images, updating key benefits, or modifying design elements — while keeping the overall layout, visual balance, and brand style consistent. Guidelines: Preserve alignment, spacing, and hierarchy of design elements.\n\nUse clean, professional fonts and maintain readability.\n\nEnsure colors and visuals stay consistent with the school's brand style.\n\nDo not add extra text, captions, or explanations in the output — only the final updated image should be returned.",
+      "skip_template_analyzer": true,
+      "created_at": "2024-01-15T10:25:00Z",
+      "updated_at": "2024-01-15T10:25:00Z",
+      "created_by": "team"
+    },
+    "insights": {
+      "name": "Insights",
+      "description": "Industry insight template with circular charts and data visualization",
+      "prompt": "You are a social media content transformer. Your task is to update the existing \"Industry Insight\" template image while strictly maintaining its original design layout and composition.\n\nReplace the top headline, supporting text, and data points inside the circular charts based on the user input. The number of data points may vary, but every new element must follow the exact positioning, spacing, and hierarchy of the existing layout.\n\nOutput format:\nGenerate the updated Industry Insight image with all changes applied exactly as per the input.\n\nGuidelines:\n- Strictly preserve the visual structure and alignment of the original template.\n- Keep all circles, numbers, and labels in the same relative position — do not move them above, below, or outside their original zone.\n- When additional data points are added, extend the existing row or grid pattern horizontally or vertically using the same visual style and spacing.\n- Maintain color palette, font style, circle shape, line thickness, and visual proportions.\n- Only update the text content, values inside circles, labels, and optional website/CTA if provided.\n- Do not alter or reinterpret the template's structure.\n- Output only the final updated image, with no extra text, captions, or description.",
+      "skip_template_analyzer": true,
+      "created_at": "2024-01-15T10:30:00Z",
+      "updated_at": "2024-01-15T10:30:00Z",
+      "created_by": "team"
+    }
+  },
+  "settings": {
+    "default_skip_analyzer": true,
+    "fallback_to_analyzer": true,
+    "prompt_version": "1.0.0",
+    "last_updated": "2024-01-15T10:15:00Z"
+  }
+}

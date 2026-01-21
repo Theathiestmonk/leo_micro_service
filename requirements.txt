@@ -1,0 +1,28 @@
+# Backend
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Configuration & Validation
+python-dotenv
+pydantic
+pydantic-settings
+
+# Supabase
+supabase
+httpx
+
+# Auth & Security
+PyJWT
+cryptography
+
+# LLM APIs
+openai
+google-genai
+
+# Scheduler
+apscheduler
+
+# Utilities
+requests
+python-dateutil
