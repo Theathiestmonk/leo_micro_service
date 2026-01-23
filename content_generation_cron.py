@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
 Content Generation Cron Job
-Processes calendar_entries where content = false and generates content using ContentCreationAgent
+Processes calendar_entries where content = false and generates content using Gemini Nano for images
 """
 
 import os
 import logging
 import asyncio
 import base64
+import json
 from typing import Dict, Any, List
 from datetime import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import openai
-import google.genai as genai
+import google.generativeai as genai
 from content_creation_agent import ContentCreationAgent
 
 # Load environment variables
@@ -35,20 +36,31 @@ class ContentGenerationCron:
         self.supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
         self.supabase = create_client(self.supabase_url, self.supabase_key)
 
-        # Initialize OpenAI
+        # Initialize OpenAI (for content generation)
         self.openai_api_key = os.getenv('OPENAI_API_KEY')
         self.openai_client = openai.OpenAI(api_key=self.openai_api_key) if self.openai_api_key else None
 
-        # Initialize Gemini client
+        # Initialize Gemini client for image generation
         gemini_api_key = os.getenv('GEMINI_API_KEY')
         self.gemini_client = None
         if gemini_api_key:
             try:
-                self.gemini_client = genai.Client(api_key=gemini_api_key)
-                logger.info("Gemini client initialized successfully")
+                genai.configure(api_key=gemini_api_key)
+                self.gemini_client = genai.GenerativeModel('gemini-1.5-flash')
+                logger.info("Gemini client initialized successfully for image generation")
             except Exception as e:
                 logger.warning(f"Failed to initialize Gemini client: {e}")
                 self.gemini_client = None
+
+        # Load image enhancer prompts
+        self.image_enhancer_prompts = {}
+        try:
+            with open('image_enhancer_prompts.json', 'r') as f:
+                data = json.load(f)
+                self.image_enhancer_prompts = data.get('image_enhancer_prompts', {})
+            logger.info(f"Loaded {len(self.image_enhancer_prompts)} image enhancer prompts")
+        except Exception as e:
+            logger.warning(f"Failed to load image enhancer prompts: {e}")
 
         # Initialize ContentCreationAgent (commented out due to missing dependencies)
         # self.content_agent = ContentCreationAgent(
@@ -62,6 +74,10 @@ class ContentGenerationCron:
         self.images_dir = os.path.join(os.getcwd(), 'generated_images')
         os.makedirs(self.images_dir, exist_ok=True)
 
+        # Create scripts directory if it doesn't exist
+        self.scripts_dir = os.path.join(os.getcwd(), 'generated_scripts')
+        os.makedirs(self.scripts_dir, exist_ok=True)
+
     async def _load_user_profile(self, user_id: str) -> Dict[str, Any]:
         """Load business context from user profile with fallback"""
         try:
@@ -70,7 +86,8 @@ class ContentGenerationCron:
                 "business_name", "business_description", "brand_tone", "brand_voice",
                 "industry", "target_audience", "unique_value_proposition",
                 "social_media_platforms", "primary_goals", "content_themes",
-                "name", "avatar_url", "onboarding_completed"
+                "name", "avatar_url", "onboarding_completed",
+                "primary_color", "secondary_color", "brand_colors"
             ]
 
             # Try to load basic profile first
@@ -81,6 +98,7 @@ class ContentGenerationCron:
             if response.data and len(response.data) > 0:
                 profile_data = response.data[0]
                 logger.info(f"Loaded business context for user {user_id}: {profile_data.get('business_name', 'Unknown')}")
+                logger.info(f"User brand colors - Primary: {profile_data.get('primary_color', 'NOT SET')}, Secondary: {profile_data.get('secondary_color', 'NOT SET')}")
 
                 # Provide default values for missing fields
                 defaults = {
@@ -90,7 +108,10 @@ class ContentGenerationCron:
                     'target_audience': profile_data.get('target_audience', ['our audience']),
                     'unique_value': profile_data.get('unique_value_proposition', 'providing value'),
                     'brand_voice': profile_data.get('brand_voice', 'professional and helpful'),
-                    'content_themes': profile_data.get('content_themes', ['business', 'growth'])
+                    'content_themes': profile_data.get('content_themes', ['business', 'growth']),
+                    'primary_color': profile_data.get('primary_color', '#007bff'),
+                    'secondary_color': profile_data.get('secondary_color', '#6c757d'),
+                    'brand_colors': profile_data.get('brand_colors', ['#007bff', '#6c757d'])
                 }
 
                 # Merge defaults with actual data
@@ -110,7 +131,10 @@ class ContentGenerationCron:
                 'industry': ['general'],
                 'target_audience': ['our audience'],
                 'unique_value_proposition': 'providing value',
-                'content_themes': ['business']
+                'content_themes': ['business'],
+                'primary_color': '#007bff',
+                'secondary_color': '#6c757d',
+                'brand_colors': ['#007bff', '#6c757d']
             }
 
     async def process_calendar_entries(self):
@@ -170,8 +194,20 @@ class ContentGenerationCron:
         content_data = await self.generate_content(entry, business_context, user_id)
 
         if content_data:
-            # Generate and save images
-            await self.generate_and_save_images(entry, content_data, user_id)
+            # Generate images only for specific content types
+            if content_data.get('generate_image', True):
+                logger.info(f"Starting image generation for {content_data.get('content_type')} content type")
+                await self.generate_and_save_images(entry, content_data, user_id)
+                logger.info(f"Completed image generation for {content_data.get('content_type')} content type")
+
+            # For reel/video content types, generate and save scripts
+            if content_data.get('generate_script', False):
+                topic = entry.get('topic', 'content')
+                script_path = self.save_script_to_file(content_data, topic, entry_id, user_id)
+                if script_path:
+                    logger.info(f"Successfully saved script for {content_data.get('content_type')} content type: {script_path}")
+                else:
+                    logger.error(f"Failed to save script for {content_data.get('content_type')} content type")
 
             # Update calendar entry to mark content as generated
             self.supabase.table('calendar_entries').update({
@@ -180,7 +216,198 @@ class ContentGenerationCron:
                 'updated_at': datetime.now().isoformat()
             }).eq('id', entry_id).execute()
 
-            logger.info(f"Successfully processed entry {entry_id}")
+            logger.info(f"Successfully processed entry {entry_id} with content type: {content_data.get('content_type')}")
+
+    def _identify_content_theme_and_select_prompt(self, content_theme: str, topic: str, business_context: Dict[str, Any], visual_style: str) -> str:
+        """Identify content theme and select the best image enhancer prompt from image_enhancer_prompts.json"""
+        try:
+            # Analyze content theme and business context to select optimal visual style
+            selected_visual_style = self._analyze_content_for_visual_style(content_theme, topic, business_context, visual_style)
+
+            logger.info(f"Selected visual style '{selected_visual_style}' for content theme '{content_theme}' and topic '{topic}'")
+
+            # Get the prompt template for the selected visual style
+            prompt_data = self.image_enhancer_prompts.get(selected_visual_style, {})
+            if not prompt_data or 'prompts' not in prompt_data:
+                logger.warning(f"No prompt found for visual style: {selected_visual_style}, falling back to minimal_clean_bold_typography")
+                prompt_data = self.image_enhancer_prompts.get('minimal_clean_bold_typography', {})
+
+            prompt_template = prompt_data['prompts'][0] if prompt_data.get('prompts') else ""
+
+            # Prepare context variables for the prompt template
+            context_vars = self._prepare_prompt_context_variables(content_theme, topic, business_context)
+
+            # Fill in the template variables
+            filled_prompt = self._fill_prompt_template(prompt_template, context_vars)
+
+            logger.info(f"Generated enhanced prompt using {selected_visual_style} style for theme: {content_theme}")
+            return filled_prompt
+
+        except Exception as e:
+            logger.error(f"Error identifying content theme and selecting prompt: {e}")
+            # Return a fallback prompt
+            return self._get_fallback_prompt(content_theme, business_context)
+
+    def _analyze_content_for_visual_style(self, content_theme: str, topic: str, business_context: Dict[str, Any], requested_visual_style: str) -> str:
+        """Analyze content to determine the best visual style from image_enhancer_prompts.json"""
+
+        # If a specific visual style is requested and exists, use it
+        if requested_visual_style and requested_visual_style in self.image_enhancer_prompts:
+            return requested_visual_style
+
+        # Content theme analysis
+        content_theme_lower = content_theme.lower()
+        topic_lower = topic.lower()
+
+        # Business context analysis
+        industry = business_context.get('industry', [])
+        if isinstance(industry, list):
+            industry = industry[0] if industry else 'general'
+        industry_lower = str(industry).lower()
+
+        brand_tone = business_context.get('brand_tone', '').lower()
+
+        # Decision logic based on content analysis
+        if any(word in content_theme_lower for word in ['business', 'corporate', 'professional', 'enterprise', 'b2b']):
+            return 'modern_corporate_b2b'
+
+        elif any(word in content_theme_lower for word in ['luxury', 'premium', 'elegant', 'high-end']):
+            return 'luxury_editorial'
+
+        elif any(word in content_theme_lower for word in ['lifestyle', 'daily', 'personal', 'authentic']):
+            return 'photography_led_lifestyle'
+
+        elif any(word in content_theme_lower for word in ['product', 'commercial', 'advertising', 'marketing']):
+            return 'product_focused_commercial'
+
+        elif any(word in content_theme_lower for word in ['educational', 'how-to', 'tutorial', 'explain']):
+            return 'isometric_explainer'
+
+        elif any(word in content_theme_lower for word in ['fun', 'youthful', 'playful', 'creative']):
+            return 'playful_youthful_memphis'
+
+        elif any(word in content_theme_lower for word in ['data', 'infographic', 'statistics', 'analytics']):
+            return 'infographic_data_driven'
+
+        elif any(word in content_theme_lower for word in ['quote', 'inspiration', 'motivation', 'thought']):
+            return 'quote_card_typography'
+
+        elif any(word in content_theme_lower for word in ['meme', 'viral', 'social', 'engagement']):
+            return 'meme_style_engagement'
+
+        elif any(word in content_theme_lower for word in ['tech', 'ai', 'future', 'innovation', 'digital']):
+            return 'futuristic_tech_dark'
+
+        elif any(word in content_theme_lower for word in ['retro', 'vintage', 'classic', 'nostalgic']):
+            return 'retro_vintage_poster'
+
+        elif any(word in content_theme_lower for word in ['modern', 'clean', 'minimal', 'simple']):
+            return 'minimal_clean_bold_typography'
+
+        elif any(word in content_theme_lower for word in ['artistic', 'abstract', 'creative', 'experimental']):
+            return 'experimental_artistic_concept'
+
+        elif any(word in content_theme_lower for word in ['illustration', 'cartoon', 'characters', 'fun']):
+            return 'flat_illustration_characters'
+
+        elif any(word in content_theme_lower for word in ['editorial', 'magazine', 'publication']):
+            return 'magazine_editorial_layout'
+
+        elif any(word in content_theme_lower for word in ['impact', 'bold', 'attention', 'striking']):
+            return 'high_impact_color_blocking'
+
+        elif any(word in content_theme_lower for word in ['glass', 'modern', 'ui', 'interface']):
+            return 'glassmorphism_neumorphism'
+
+        elif any(word in content_theme_lower for word in ['texture', 'paper', 'handmade', 'organic']):
+            return 'textured_design_paper'
+
+        elif any(word in content_theme_lower for word in ['abstract', 'shapes', 'fluid', 'gradient']):
+            return 'abstract_shapes_gradients'
+
+        elif any(word in content_theme_lower for word in ['festive', 'celebration', 'holiday', 'seasonal']):
+            return 'festive_campaign_creative'
+
+        # Industry-based selection
+        elif 'fashion' in industry_lower or 'beauty' in industry_lower:
+            return 'luxury_editorial'
+
+        elif 'tech' in industry_lower or 'software' in industry_lower:
+            return 'futuristic_tech_dark'
+
+        elif 'food' in industry_lower or 'restaurant' in industry_lower:
+            return 'photography_led_lifestyle'
+
+        elif 'finance' in industry_lower or 'consulting' in industry_lower:
+            return 'modern_corporate_b2b'
+
+        # Brand tone based selection
+        elif 'luxurious' in brand_tone or 'elegant' in brand_tone:
+            return 'luxury_editorial'
+
+        elif 'professional' in brand_tone or 'corporate' in brand_tone:
+            return 'modern_corporate_b2b'
+
+        elif 'playful' in brand_tone or 'fun' in brand_tone:
+            return 'playful_youthful_memphis'
+
+        # Default fallback
+        return 'minimal_clean_bold_typography'
+
+    def _prepare_prompt_context_variables(self, content_theme: str, topic: str, business_context: Dict[str, Any]) -> Dict[str, str]:
+        """Prepare context variables for prompt template filling"""
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        current_time = datetime.now().strftime("%H:%M:%S")
+
+        # Brand assets context with primary colors
+        brand_assets_context = f"Primary Color: {business_context.get('primary_color', '#007bff')}, Secondary Color: {business_context.get('secondary_color', '#6c757d')}"
+
+        # Location context (can be expanded later)
+        location_context = "Business location context not available"
+
+        # Industry and audience handling
+        industry = business_context.get('industry', ['General'])
+        if isinstance(industry, list):
+            industry = industry[0] if industry else 'General'
+
+        target_audience = business_context.get('target_audience', ['General audience'])
+        if isinstance(target_audience, list):
+            target_audience = target_audience[0] if target_audience else 'General audience'
+
+        # Generated post content
+        generated_post = {
+            'title': f"{business_context.get('business_name', 'Business')} - {topic}",
+            'content': f"Content about {content_theme}: {topic} for {business_context.get('business_name', 'our business')}"
+        }
+
+        return {
+            'current_date': current_date,
+            'current_time': current_time,
+            'business_context.get(\'industry\', \'General\')': industry,
+            'business_context.get(\'target_audience\', \'General audience\')': target_audience,
+            'business_context.get(\'brand_tone\', \'Approachable\')': business_context.get('brand_tone', 'Approachable'),
+            'business_context.get(\'brand_voice\', \'Professional and friendly\')': business_context.get('brand_voice', 'Professional and friendly'),
+            'brand_assets_context': brand_assets_context,
+            'location_context': location_context,
+            'generated_post.get(\'title\', \'\')': generated_post['title'],
+            'generated_post.get(\'content\', \'\')': generated_post['content']
+        }
+
+    def _fill_prompt_template(self, template: str, context_vars: Dict[str, str]) -> str:
+        """Fill in the prompt template with context variables"""
+        filled_prompt = template
+        for placeholder, value in context_vars.items():
+            filled_prompt = filled_prompt.replace(f"{{{placeholder}}}", str(value))
+        return filled_prompt
+
+    def _get_fallback_prompt(self, content_theme: str, business_context: Dict[str, Any]) -> str:
+        """Get a fallback prompt when enhanced prompt selection fails"""
+        business_name = business_context.get('business_name', 'Business')
+        primary_color = business_context.get('primary_color', '#007bff')
+
+        return f"""Create a professional image for {business_name} about {content_theme}.
+Use primary brand color {primary_color}.
+Make it suitable for social media with high quality and engaging design."""
 
     async def generate_content(self, entry: Dict[str, Any], business_context: Dict[str, Any], user_id: str) -> Dict[str, Any]:
         """Generate content based on content_type with comprehensive business context"""
@@ -188,6 +415,8 @@ class ContentGenerationCron:
             topic = entry.get('topic', 'Sample Topic')
             platform = entry.get('platform', 'Instagram')
             content_type = entry.get('content_type', 'static_post')
+            content_theme = entry.get('content_theme', 'business')
+            visual_style = entry.get('visual_style', 'minimal_clean_bold_typography')
 
             # Extract business context information
             business_name = business_context.get('business_name', 'Our Business')
@@ -200,20 +429,27 @@ class ContentGenerationCron:
             if isinstance(target_audience, list):
                 target_audience = target_audience[0] if target_audience else 'our audience'
             unique_value = business_context.get('unique_value_proposition', 'providing value')
+            primary_color = business_context.get('primary_color', '#007bff')
+            secondary_color = business_context.get('secondary_color', '#6c757d')
 
             # Generate content based on content_type
             content_data = {
                 'platform': platform,
                 'topic': topic,
                 'content_type': content_type,
+                'content_theme': content_theme,
+                'visual_style': visual_style,
                 'tone': brand_tone,
                 'business_name': business_name,
                 'industry': industry,
                 'target_audience': target_audience,
                 'brand_voice': brand_voice,
-                'unique_value': unique_value
+                'unique_value': unique_value,
+                'primary_color': primary_color,
+                'secondary_color': secondary_color
             }
 
+            # Handle different content types
             if content_type == 'static_post':
                 # Single image post with caption
                 content_data.update({
@@ -221,11 +457,23 @@ class ContentGenerationCron:
                     'content': f"Discover how {business_name} helps {target_audience} with {topic}. Our {unique_value} makes us the perfect partner for your {industry} needs. #BusinessExcellence",
                     'image_type': 'single_image',
                     'aspect_ratio': '1:1',  # Square for Instagram posts
-                    'text_overlay': True
+                    'text_overlay': True,
+                    'generate_image': True
+                })
+
+            elif content_type == 'image_post':
+                # Single image post (similar to static_post but focused on image)
+                content_data.update({
+                    'title': f"{business_name}: {topic}",
+                    'content': f"Visual insights about {topic} from {business_name}. Perfect for {target_audience} in {industry}.",
+                    'image_type': 'single_image',
+                    'aspect_ratio': '1:1',
+                    'text_overlay': False,
+                    'generate_image': True
                 })
 
             elif content_type == 'carousel':
-                # Multi-slide carousel post
+                # Multi-slide carousel post - generate images for each slide
                 content_data.update({
                     'title': f"{topic} - Complete Guide by {business_name}",
                     'content': f"📱 Swipe through our complete guide to {topic}! Our expertise in {industry} helps {target_audience} achieve better results. Follow along for valuable insights! 📈",
@@ -237,26 +485,28 @@ class ContentGenerationCron:
                     ],
                     'image_type': 'carousel',
                     'aspect_ratio': '1:1',
-                    'slide_count': 4
+                    'slide_count': 4,
+                    'generate_image': True
                 })
 
             elif content_type == 'story':
-                # Vertical story format
+                # Vertical story format - generate image
                 content_data.update({
                     'title': f"Quick Tip: {topic}",
                     'content': f"💡 {topic} hack for {target_audience} in {industry}! At {business_name}, we believe in {brand_voice} communication. Tap to learn more! 👆",
                     'image_type': 'story',
                     'aspect_ratio': '9:16',  # Vertical for stories
                     'duration': '15 seconds',
-                    'interactive_elements': ['tap_to_learn_more', 'swipe_up']
+                    'interactive_elements': ['tap_to_learn_more', 'swipe_up'],
+                    'generate_image': True
                 })
 
-            elif content_type == 'short_video or reel':
-                # Short-form video content
+            elif content_type == 'reel':
+                # Short-form video content - generate script only
                 content_data.update({
                     'title': f"{topic} Explained",
                     'content': f"🎬 Watch: How {business_name} helps {target_audience} with {topic}. Our {industry} expertise makes {unique_value} possible!",
-                    'short_video_script': {
+                    'reel_script': {
                         'hook': f"Did you know {topic} can transform your {industry} business?",
                         'value': f"At {business_name}, we help {target_audience} achieve better results with {topic}",
                         'story': f"Here's how {unique_value} makes the difference",
@@ -265,11 +515,13 @@ class ContentGenerationCron:
                     'image_type': 'video_thumbnail',
                     'aspect_ratio': '9:16',  # Vertical for Reels
                     'duration': '15-30 seconds',
-                    'video_elements': ['hook_clip', 'explanation', 'testimonial', 'call_to_action']
+                    'video_elements': ['hook_clip', 'explanation', 'testimonial', 'call_to_action'],
+                    'generate_image': False,  # Scripts only for reels
+                    'generate_script': True
                 })
 
-            elif content_type == 'long_video':
-                # Full-length video content
+            elif content_type == 'video':
+                # Full-length video content - generate script only
                 content_data.update({
                     'title': f"Complete Guide: {topic}",
                     'content': f"🎥 Full video: Everything you need to know about {topic}. Our {industry} experts at {business_name} break it down for {target_audience}!",
@@ -282,22 +534,9 @@ class ContentGenerationCron:
                     'image_type': 'video_thumbnail',
                     'aspect_ratio': '16:9',  # Horizontal for YouTube
                     'duration': '5-15 minutes',
-                    'video_elements': ['title_card', 'expert_interview', 'demonstration', 'q_and_a']
-                })
-
-            elif content_type == 'email':
-                # Email marketing content
-                content_data.update({
-                    'title': f"Important: {topic}",
-                    'content': f"Subject: {topic} - Insights for {target_audience}\n\nDear valued {target_audience},\n\nWe're excited to share our latest insights on {topic}. As leaders in {industry}, {business_name} has helped countless organizations achieve better results.\n\nOur {unique_value} approach ensures you get the best possible outcomes.\n\nBest regards,\n{business_name} Team",
-                    'email_elements': {
-                        'subject': f"{topic} - Insights for {target_audience}",
-                        'preview_text': f"Discover how {business_name} can help with {topic}",
-                        'body': f"Comprehensive information about {topic} for {target_audience}",
-                        'cta': f"Learn more about our {industry} solutions"
-                    },
-                    'image_type': 'email_header',
-                    'aspect_ratio': '16:9'
+                    'video_elements': ['title_card', 'expert_interview', 'demonstration', 'q_and_a'],
+                    'generate_image': False,  # Scripts only for videos
+                    'generate_script': True
                 })
 
             else:
@@ -306,7 +545,8 @@ class ContentGenerationCron:
                     'title': f"{business_name} - {topic}",
                     'content': f"Exciting news from {business_name}! We're sharing insights about {topic} that matter to {target_audience} in {industry}.",
                     'image_type': 'single_image',
-                    'aspect_ratio': '1:1'
+                    'aspect_ratio': '1:1',
+                    'generate_image': True
                 })
 
             # Generate relevant hashtags from business context
@@ -335,118 +575,133 @@ class ContentGenerationCron:
             return None
 
     async def generate_and_save_images(self, entry: Dict[str, Any], content_data: Dict[str, Any], user_id: str):
-        """Generate and save images based on the content"""
+        """Generate and save images based on the content using Gemini Nano"""
         try:
             topic = entry.get('topic', 'content').replace(' ', '_').replace('/', '_')
-            visual_style = entry.get('visual_style', 'modern')
+            visual_style = entry.get('visual_style', 'minimal_clean_bold_typography')
             platform = entry.get('platform', 'Instagram')
+            content_theme = entry.get('content_theme', 'business')
 
-            # Generate image prompt based on content
-            image_prompt = self.create_image_prompt(content_data, visual_style, platform)
+            # Get business context for the image prompt
+            business_context = await self._load_user_profile(user_id)
 
-            # Generate image using OpenAI DALL-E
+            # Log the actual colors being used
+            primary_color = business_context.get('primary_color', '#007bff')
+            secondary_color = business_context.get('secondary_color', '#6c757d')
+            logger.info(f"Using user colors for image generation - Primary: {primary_color}, Secondary: {secondary_color}")
+
+            # Generate enhanced image prompt using content theme identification and image enhancer prompts
+            enhanced_prompt = self._identify_content_theme_and_select_prompt(content_theme, topic, business_context, visual_style)
+
+            # Create final image prompt that incorporates business context and colors
+            image_prompt = self.create_gemini_image_prompt(content_data, visual_style, platform, business_context, enhanced_prompt)
+
+            # Generate image using OpenAI DALL-E with Gemini-enhanced prompt
             if self.openai_client and image_prompt:
-                response = self.openai_client.images.generate(
-                    model="dall-e-3",
-                    prompt=image_prompt,
-                    size="1024x1024",
-                    quality="standard",
-                    n=1
-                )
+                try:
+                    logger.info(f"Using Gemini-enhanced prompt for image generation: {image_prompt[:100]}...")
 
-                image_url = response.data[0].url
+                    response = self.openai_client.images.generate(
+                        model="dall-e-3",
+                        prompt=image_prompt,
+                        size="1024x1024",
+                        quality="standard",
+                        n=1
+                    )
 
-                # Download and save the image
-                await self.download_and_save_image(image_url, topic, entry['id'])
+                    image_url = response.data[0].url
 
-                logger.info(f"Generated and saved image for topic: {topic}")
+                    # Download and save the image
+                    await self.download_and_save_image(image_url, topic, entry['id'])
+
+                    logger.info(f"Generated and saved image for topic: {topic} using Gemini-enhanced prompt with OpenAI DALL-E")
+
+                except Exception as e:
+                    logger.error(f"Error with OpenAI image generation: {e}")
+                    # Try basic prompt as fallback
+                    try:
+                        basic_prompt = f"Create a professional {visual_style} image for {platform} about {topic} for {business_context.get('business_name', 'a business')} in the {business_context.get('industry', 'general')} industry"
+                        response = self.openai_client.images.generate(
+                            model="dall-e-3",
+                            prompt=basic_prompt,
+                            size="1024x1024",
+                            quality="standard",
+                            n=1
+                        )
+
+                        image_url = response.data[0].url
+                        await self.download_and_save_image(image_url, topic, entry['id'])
+
+                        logger.info(f"Generated and saved image for topic: {topic} using basic fallback prompt")
+                    except Exception as fallback_error:
+                        logger.error(f"Error with fallback image generation: {fallback_error}")
+            else:
+                logger.warning("OpenAI client not available for image generation")
 
         except Exception as e:
             logger.error(f"Error generating/saving image for entry {entry['id']}: {e}")
 
-    def create_image_prompt(self, content_data: Dict[str, Any], visual_style: str, platform: str) -> str:
-        """Create an image generation prompt based on content type and business context"""
+    def create_gemini_image_prompt(self, content_data: Dict[str, Any], visual_style: str, platform: str, business_context: Dict[str, Any], enhanced_prompt: str) -> str:
+        """Create an image generation prompt for Gemini Nano based on content type and business context"""
         try:
-            title = content_data.get('title', '')
-            content = content_data.get('content', '')
             topic = content_data.get('topic', '')
             content_type = content_data.get('content_type', 'static_post')
-            image_type = content_data.get('image_type', 'single_image')
+            content_theme = content_data.get('content_theme', 'business')
             aspect_ratio = content_data.get('aspect_ratio', '1:1')
             business_name = content_data.get('business_name', 'business')
-            industry = content_data.get('industry', 'general')
-            brand_tone = content_data.get('tone', 'professional')
-            target_audience = content_data.get('target_audience', 'audience')
+            primary_color = content_data.get('primary_color', '#007bff')
+            secondary_color = content_data.get('secondary_color', '#6c757d')
 
-            # Base prompt structure
-            prompt = f"Create a {visual_style} style image for {platform} {content_type}"
-
-            # Customize based on content type and image type
-            if content_type == 'static_post' and image_type == 'single_image':
-                prompt += f" featuring {business_name} branding"
-                if aspect_ratio == '1:1':
-                    prompt += " in square format perfect for Instagram posts"
-                prompt += ". Include text overlay space for the caption."
-
-            elif content_type == 'carousel':
-                slide_count = content_data.get('slide_count', 4)
-                prompt += f" carousel set with {slide_count} connected slides"
-                carousel_info = content_data.get('carousel_images', [])
-                if carousel_info:
-                    prompt += f". First slide: {carousel_info[0].get('description', '')}"
-                prompt += ". Design as a cohesive carousel series."
-
-            elif content_type == 'story':
-                prompt += f" in vertical story format (9:16 aspect ratio)"
-                if content_data.get('interactive_elements'):
-                    prompt += ". Include interactive elements like call-to-action overlays"
-                prompt += ". Optimized for mobile story viewing."
-
-            elif content_type in ['short_video or reel', 'long_video']:
-                prompt += f" video thumbnail for {content_type}"
-                if aspect_ratio == '9:16':
-                    prompt += " in vertical format for mobile video"
-                elif aspect_ratio == '16:9':
-                    prompt += " in horizontal format for YouTube"
-                prompt += ". Eye-catching thumbnail design to maximize click-through rate."
-
-            elif content_type == 'email':
-                prompt += " email header/banner"
-                prompt += ". Professional design suitable for email marketing campaigns."
-
+            # Use the enhanced prompt as the base, which is already intelligently selected
+            if enhanced_prompt and len(enhanced_prompt) > 50:  # Ensure it's a real enhanced prompt
+                prompt = enhanced_prompt
+                logger.info(f"Using intelligently selected enhanced prompt for {content_theme} theme")
             else:
-                prompt += f" for {business_name}"
+                # Fallback if enhanced prompt is not available
+                prompt = f"Create a professional {visual_style} image for {platform} about {topic} in {content_theme} theme"
 
-            # Add business context
-            prompt += f"""
+            # Add specific content instructions based on type
+            content_specific_addition = self._get_content_specific_prompt_addition(content_data)
 
-Business Context:
-- Company: {business_name}
-- Industry: {industry}
-- Target Audience: {target_audience}
-- Brand Tone: {brand_tone}
+            # Add brand color reinforcement
+            brand_color_addition = f"""
 
-Content Details:
-- Title: {title}
-- Topic: {topic}
-- Content Type: {content_type}
+CRITICAL BRAND COLOR REQUIREMENTS:
+- Primary Brand Color: {primary_color} (USE THIS AS THE DOMINANT COLOR)
+- Secondary Brand Color: {secondary_color} (USE FOR ACCENTS AND SECONDARY ELEMENTS)
+- Business: {business_name}
+- Content Theme: {content_theme}
+- Platform: {platform}
+- Aspect Ratio: {aspect_ratio}
 
-Style Requirements:
-- {visual_style} aesthetic matching {brand_tone} brand tone
-- Optimized for {platform} platform
-- Professional and engaging for {industry} industry
-- High quality, suitable for social media
-- Include relevant visual elements for {business_name}'s {industry} business
-- Reflect {target_audience} as the target audience
-- Modern, clean design with brand-appropriate colors
-- Aspect ratio: {aspect_ratio}
-"""
+ENSURE THE GENERATED IMAGE INCORPORATES THESE BRAND COLORS PROMINENTLY.
+
+VERIFICATION: These colors come from the user's profile in Supabase (user_id: {business_context.get('id', 'unknown')})."""
 
             return prompt.strip()
 
         except Exception as e:
-            logger.error(f"Error creating image prompt: {e}")
-            return None
+            logger.error(f"Error creating Gemini image prompt: {e}")
+            return f"Create a professional image about {topic} for {business_name} in {industry} industry, using primary color {primary_color}"
+
+    def _get_content_specific_prompt_addition(self, content_data: Dict[str, Any]) -> str:
+        """Get content-type specific prompt additions"""
+        content_type = content_data.get('content_type', 'static_post')
+        topic = content_data.get('topic', '')
+        content_theme = content_data.get('content_theme', 'business')
+
+        if content_type == 'carousel':
+            slide_count = content_data.get('slide_count', 4)
+            return f"\n\nCONTENT SPECIFIC: This is part of a {slide_count}-slide carousel series about '{topic}' in '{content_theme}' theme. Design as a cohesive carousel image."
+
+        elif content_type == 'story':
+            return f"\n\nCONTENT SPECIFIC: Vertical story format optimized for mobile viewing about '{topic}' in '{content_theme}' theme."
+
+        elif content_type in ['static_post', 'image_post']:
+            return f"\n\nCONTENT SPECIFIC: Single image post about '{topic}' in '{content_theme}' theme, perfect for Instagram feed."
+
+        else:
+            return f"\n\nCONTENT SPECIFIC: Content about '{topic}' in '{content_theme}' theme."
 
     async def download_and_save_image(self, image_url: str, topic: str, entry_id: str):
         """Download image from URL and save to local directory"""
@@ -472,6 +727,115 @@ Style Requirements:
 
         except Exception as e:
             logger.error(f"Error downloading/saving image: {e}")
+
+    async def save_image_from_base64(self, image_data: str, topic: str, entry_id: str):
+        """Save image from base64 data to local directory"""
+        try:
+            import base64
+
+            # Decode base64 image data
+            image_bytes = base64.b64decode(image_data)
+
+            # Create filename (sanitize topic to remove invalid characters)
+            import re
+            sanitized_topic = re.sub(r'[<>:"/\\|?*\'"]', '', topic)  # Remove invalid Windows filename characters
+            sanitized_topic = sanitized_topic.replace(' ', '_')[:50]  # Replace spaces with underscores, limit length
+            filename = f"{sanitized_topic}_{entry_id[:8]}.png"
+            filepath = os.path.join(self.images_dir, filename)
+
+            # Save image
+            with open(filepath, 'wb') as f:
+                f.write(image_bytes)
+
+            logger.info(f"Saved Gemini-generated image: {filepath}")
+
+        except Exception as e:
+            logger.error(f"Error saving base64 image: {e}")
+
+    def save_script_to_file(self, content_data: Dict[str, Any], topic: str, entry_id: str, user_id: str):
+        """Save generated script to local file"""
+        try:
+            content_type = content_data.get('content_type', 'unknown')
+            business_name = content_data.get('business_name', 'Business')
+
+            # Create filename (sanitize topic to remove invalid characters)
+            import re
+            sanitized_topic = re.sub(r'[<>:"/\\|?*\'"]', '', topic)  # Remove invalid Windows filename characters
+            sanitized_topic = sanitized_topic.replace(' ', '_')[:50]  # Replace spaces with underscores, limit length
+
+            filename = f"{content_type}_{sanitized_topic}_{entry_id[:8]}.txt"
+            filepath = os.path.join(self.scripts_dir, filename)
+
+            # Prepare script content based on content type
+            script_content = self._format_script_content(content_data, business_name, user_id)
+
+            # Save script to file
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(script_content)
+
+            logger.info(f"Saved script: {filepath}")
+            return filepath
+
+        except Exception as e:
+            logger.error(f"Error saving script: {e}")
+            return None
+
+    def _format_script_content(self, content_data: Dict[str, Any], business_name: str, user_id: str) -> str:
+        """Format script content based on content type"""
+        content_type = content_data.get('content_type', 'unknown')
+        topic = content_data.get('topic', '')
+        title = content_data.get('title', '')
+
+        script_lines = []
+        script_lines.append("=" * 60)
+        script_lines.append(f"CONTENT TYPE: {content_type.upper()}")
+        script_lines.append(f"BUSINESS: {business_name}")
+        script_lines.append(f"TOPIC: {topic}")
+        script_lines.append(f"USER ID: {user_id}")
+        script_lines.append(f"GENERATED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        script_lines.append("=" * 60)
+        script_lines.append("")
+
+        if content_type == 'reel':
+            script_lines.append("🎬 REEL SCRIPT")
+            script_lines.append("=" * 30)
+
+            reel_script = content_data.get('reel_script', {})
+            script_lines.append(f"🎯 HOOK: {reel_script.get('hook', 'N/A')}")
+            script_lines.append("")
+            script_lines.append(f"💎 VALUE PROPOSITION: {reel_script.get('value', 'N/A')}")
+            script_lines.append("")
+            script_lines.append(f"📖 STORY: {reel_script.get('story', 'N/A')}")
+            script_lines.append("")
+            script_lines.append(f"📢 CALL TO ACTION: {reel_script.get('cta', 'N/A')}")
+
+        elif content_type == 'video':
+            script_lines.append("🎥 VIDEO SCRIPT")
+            script_lines.append("=" * 30)
+
+            video_script = content_data.get('video_script', {})
+            script_lines.append(f"🎬 INTRODUCTION: {video_script.get('introduction', 'N/A')}")
+            script_lines.append("")
+            script_lines.append(f"📚 MAIN CONTENT: {video_script.get('main_content', 'N/A')}")
+            script_lines.append("")
+            script_lines.append(f"🎓 EXPERT INSIGHTS: {video_script.get('expert_insights', 'N/A')}")
+            script_lines.append("")
+            script_lines.append(f"🏁 CONCLUSION: {video_script.get('conclusion', 'N/A')}")
+
+        # Add technical details
+        script_lines.append("")
+        script_lines.append("=" * 60)
+        script_lines.append("TECHNICAL DETAILS:")
+        script_lines.append(f"Duration: {content_data.get('duration', 'N/A')}")
+        script_lines.append(f"Platform: {content_data.get('platform', 'N/A')}")
+        script_lines.append(f"Aspect Ratio: {content_data.get('aspect_ratio', 'N/A')}")
+
+        if content_data.get('video_elements'):
+            script_lines.append(f"Video Elements: {', '.join(content_data['video_elements'])}")
+
+        script_lines.append("=" * 60)
+
+        return "\n".join(script_lines)
 
 async def main():
     """Main function to run the cron job"""

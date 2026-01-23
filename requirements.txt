@@ -18,7 +18,7 @@ cryptography
 
 # LLM APIs
 openai
-google-genai
+google-generativeai
 
 # Scheduler
 apscheduler
