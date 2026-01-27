@@ -9,7 +9,8 @@ import logging
 import asyncio
 import base64
 import json
-from typing import Dict, Any, List
+import uuid
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -70,13 +71,7 @@ class ContentGenerationCron:
         # )
         self.content_agent = None  # Will use mock functionality
 
-        # Create images directory if it doesn't exist
-        self.images_dir = os.path.join(os.getcwd(), 'generated_images')
-        os.makedirs(self.images_dir, exist_ok=True)
-
-        # Create scripts directory if it doesn't exist
-        self.scripts_dir = os.path.join(os.getcwd(), 'generated_scripts')
-        os.makedirs(self.scripts_dir, exist_ok=True)
+        # Removed local directory creation - everything is now saved directly to Supabase
 
     async def _load_user_profile(self, user_id: str) -> Dict[str, Any]:
         """Load business context from user profile with fallback"""
@@ -194,20 +189,31 @@ class ContentGenerationCron:
         content_data = await self.generate_content(entry, business_context, user_id)
 
         if content_data:
+            generated_image_url = None
+            generated_caption = None
+            
             # Generate images only for specific content types
             if content_data.get('generate_image', True):
                 logger.info(f"Starting image generation for {content_data.get('content_type')} content type")
-                await self.generate_and_save_images(entry, content_data, user_id)
-                logger.info(f"Completed image generation for {content_data.get('content_type')} content type")
+                result = await self.generate_and_save_images(entry, content_data, user_id)
+                if result:
+                    generated_image_url = result.get('image_url')
+                    generated_caption = result.get('caption')
+                    logger.info(f"Completed image generation for {content_data.get('content_type')} content type")
+                    logger.info(f"Generated image URL: {generated_image_url}")
+                    logger.info(f"Generated caption: {generated_caption[:100] if generated_caption else 'None'}...")
 
-            # For reel/video content types, generate and save scripts
-            if content_data.get('generate_script', False):
-                topic = entry.get('topic', 'content')
-                script_path = self.save_script_to_file(content_data, topic, entry_id, user_id)
-                if script_path:
-                    logger.info(f"Successfully saved script for {content_data.get('content_type')} content type: {script_path}")
-                else:
-                    logger.error(f"Failed to save script for {content_data.get('content_type')} content type")
+            # Scripts are now saved directly to database in save_to_created_content method
+            # No need to save scripts to local files anymore
+
+            # Save to created_content table
+            await self.save_to_created_content(
+                entry=entry,
+                content_data=content_data,
+                user_id=user_id,
+                image_url=generated_image_url,
+                caption=generated_caption
+            )
 
             # Update calendar entry to mark content as generated
             self.supabase.table('calendar_entries').update({
@@ -574,10 +580,11 @@ Make it suitable for social media with high quality and engaging design."""
             logger.error(f"Error generating content for entry {entry['id']}: {e}")
             return None
 
-    async def generate_and_save_images(self, entry: Dict[str, Any], content_data: Dict[str, Any], user_id: str):
-        """Generate and save images based on the content using Gemini Nano"""
+    async def generate_and_save_images(self, entry: Dict[str, Any], content_data: Dict[str, Any], user_id: str) -> Optional[Dict[str, str]]:
+        """Generate and save images based on the content using Gemini Nano. Returns dict with image_url and caption."""
         try:
-            topic = entry.get('topic', 'content').replace(' ', '_').replace('/', '_')
+            topic = entry.get('topic', 'content')
+            topic_sanitized = topic.replace(' ', '_').replace('/', '_')
             visual_style = entry.get('visual_style', 'minimal_clean_bold_typography')
             platform = entry.get('platform', 'Instagram')
             content_theme = entry.get('content_theme', 'business')
@@ -609,12 +616,34 @@ Make it suitable for social media with high quality and engaging design."""
                         n=1
                     )
 
-                    image_url = response.data[0].url
+                    dall_e_image_url = response.data[0].url
+                    logger.info(f"Generated image from DALL-E: {dall_e_image_url}")
 
-                    # Download and save the image
-                    await self.download_and_save_image(image_url, topic, entry['id'])
+                    # Download image and upload to Supabase Storage
+                    uploaded_image_url = await self.upload_image_to_supabase(
+                        image_url=dall_e_image_url,
+                        topic=topic_sanitized,
+                        entry_id=entry['id'],
+                        user_id=user_id
+                    )
 
-                    logger.info(f"Generated and saved image for topic: {topic} using Gemini-enhanced prompt with OpenAI DALL-E")
+                    if uploaded_image_url:
+                        # Generate caption for the image
+                        caption = await self.generate_caption_for_image(
+                            image_url=uploaded_image_url,
+                            topic=topic,
+                            content_data=content_data,
+                            business_context=business_context
+                        )
+
+                        logger.info(f"Generated and uploaded image for topic: {topic} using Gemini-enhanced prompt with OpenAI DALL-E")
+                        return {
+                            'image_url': uploaded_image_url,
+                            'caption': caption
+                        }
+                    else:
+                        logger.error("Failed to upload image to Supabase Storage")
+                        return None
 
                 except Exception as e:
                     logger.error(f"Error with OpenAI image generation: {e}")
@@ -629,17 +658,43 @@ Make it suitable for social media with high quality and engaging design."""
                             n=1
                         )
 
-                        image_url = response.data[0].url
-                        await self.download_and_save_image(image_url, topic, entry['id'])
+                        dall_e_image_url = response.data[0].url
+                        
+                        # Upload to Supabase Storage
+                        uploaded_image_url = await self.upload_image_to_supabase(
+                            image_url=dall_e_image_url,
+                            topic=topic_sanitized,
+                            entry_id=entry['id'],
+                            user_id=user_id
+                        )
 
-                        logger.info(f"Generated and saved image for topic: {topic} using basic fallback prompt")
+                        if uploaded_image_url:
+                            # Generate caption
+                            caption = await self.generate_caption_for_image(
+                                image_url=uploaded_image_url,
+                                topic=topic,
+                                content_data=content_data,
+                                business_context=business_context
+                            )
+
+                            logger.info(f"Generated and uploaded image for topic: {topic} using basic fallback prompt")
+                            return {
+                                'image_url': uploaded_image_url,
+                                'caption': caption
+                            }
+                        else:
+                            logger.error("Failed to upload image to Supabase Storage")
+                            return None
                     except Exception as fallback_error:
                         logger.error(f"Error with fallback image generation: {fallback_error}")
+                        return None
             else:
                 logger.warning("OpenAI client not available for image generation")
+                return None
 
         except Exception as e:
             logger.error(f"Error generating/saving image for entry {entry['id']}: {e}")
+            return None
 
     def create_gemini_image_prompt(self, content_data: Dict[str, Any], visual_style: str, platform: str, business_context: Dict[str, Any], enhanced_prompt: str) -> str:
         """Create an image generation prompt for Gemini Nano based on content type and business context"""
@@ -703,139 +758,240 @@ VERIFICATION: These colors come from the user's profile in Supabase (user_id: {b
         else:
             return f"\n\nCONTENT SPECIFIC: Content about '{topic}' in '{content_theme}' theme."
 
-    async def download_and_save_image(self, image_url: str, topic: str, entry_id: str):
-        """Download image from URL and save to local directory"""
+    async def upload_image_to_supabase(self, image_url: str, topic: str, entry_id: str, user_id: str) -> Optional[str]:
+        """Download image from URL and upload to Supabase Storage. Returns public URL."""
         try:
             import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(image_url)
                 response.raise_for_status()
+                image_bytes = response.content
 
                 # Create filename (sanitize topic to remove invalid characters)
                 import re
                 sanitized_topic = re.sub(r'[<>:"/\\|?*\'"]', '', topic)  # Remove invalid Windows filename characters
                 sanitized_topic = sanitized_topic.replace(' ', '_')[:50]  # Replace spaces with underscores, limit length
-                filename = f"{sanitized_topic}_{entry_id[:8]}.png"
-                filepath = os.path.join(self.images_dir, filename)
+                
+                # Generate unique filename for Supabase Storage
+                unique_id = str(uuid.uuid4())[:8]
+                filename = f"cron_generated/{sanitized_topic}_{entry_id[:8]}_{unique_id}.png"
+                
+                logger.info(f"📤 Uploading image to Supabase Storage: {filename}")
 
-                # Save image
-                with open(filepath, 'wb') as f:
-                    f.write(response.content)
+                # Upload to ai-generated-images bucket
+                storage_response = self.supabase.storage.from_("ai-generated-images").upload(
+                    filename,
+                    image_bytes,
+                    file_options={"content-type": "image/png", "upsert": "false"}
+                )
 
-                logger.info(f"Saved image: {filepath}")
+                if hasattr(storage_response, 'error') and storage_response.error:
+                    logger.error(f"Storage upload error: {storage_response.error}")
+                    return None
 
-        except Exception as e:
-            logger.error(f"Error downloading/saving image: {e}")
+                # Get public URL
+                public_url = self.supabase.storage.from_("ai-generated-images").get_public_url(filename)
+                logger.info(f"✅ Image uploaded successfully to Supabase Storage: {public_url}")
 
-    async def save_image_from_base64(self, image_data: str, topic: str, entry_id: str):
-        """Save image from base64 data to local directory"""
-        try:
-            import base64
-
-            # Decode base64 image data
-            image_bytes = base64.b64decode(image_data)
-
-            # Create filename (sanitize topic to remove invalid characters)
-            import re
-            sanitized_topic = re.sub(r'[<>:"/\\|?*\'"]', '', topic)  # Remove invalid Windows filename characters
-            sanitized_topic = sanitized_topic.replace(' ', '_')[:50]  # Replace spaces with underscores, limit length
-            filename = f"{sanitized_topic}_{entry_id[:8]}.png"
-            filepath = os.path.join(self.images_dir, filename)
-
-            # Save image
-            with open(filepath, 'wb') as f:
-                f.write(image_bytes)
-
-            logger.info(f"Saved Gemini-generated image: {filepath}")
+                return public_url
 
         except Exception as e:
-            logger.error(f"Error saving base64 image: {e}")
-
-    def save_script_to_file(self, content_data: Dict[str, Any], topic: str, entry_id: str, user_id: str):
-        """Save generated script to local file"""
-        try:
-            content_type = content_data.get('content_type', 'unknown')
-            business_name = content_data.get('business_name', 'Business')
-
-            # Create filename (sanitize topic to remove invalid characters)
-            import re
-            sanitized_topic = re.sub(r'[<>:"/\\|?*\'"]', '', topic)  # Remove invalid Windows filename characters
-            sanitized_topic = sanitized_topic.replace(' ', '_')[:50]  # Replace spaces with underscores, limit length
-
-            filename = f"{content_type}_{sanitized_topic}_{entry_id[:8]}.txt"
-            filepath = os.path.join(self.scripts_dir, filename)
-
-            # Prepare script content based on content type
-            script_content = self._format_script_content(content_data, business_name, user_id)
-
-            # Save script to file
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(script_content)
-
-            logger.info(f"Saved script: {filepath}")
-            return filepath
-
-        except Exception as e:
-            logger.error(f"Error saving script: {e}")
+            logger.error(f"Error uploading image to Supabase: {e}")
             return None
 
-    def _format_script_content(self, content_data: Dict[str, Any], business_name: str, user_id: str) -> str:
-        """Format script content based on content type"""
-        content_type = content_data.get('content_type', 'unknown')
-        topic = content_data.get('topic', '')
-        title = content_data.get('title', '')
+    # Removed download_and_save_image method - images are now only saved to Supabase Storage
 
-        script_lines = []
-        script_lines.append("=" * 60)
-        script_lines.append(f"CONTENT TYPE: {content_type.upper()}")
-        script_lines.append(f"BUSINESS: {business_name}")
-        script_lines.append(f"TOPIC: {topic}")
-        script_lines.append(f"USER ID: {user_id}")
-        script_lines.append(f"GENERATED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        script_lines.append("=" * 60)
-        script_lines.append("")
+    # Removed save_image_from_base64 method - images are now only saved to Supabase Storage
 
-        if content_type == 'reel':
-            script_lines.append("🎬 REEL SCRIPT")
-            script_lines.append("=" * 30)
+    async def generate_caption_for_image(self, image_url: str, topic: str, content_data: Dict[str, Any], business_context: Dict[str, Any]) -> str:
+        """Generate a compelling caption for the generated image using OpenAI"""
+        try:
+            platform = content_data.get('platform', 'Instagram')
+            content_type = content_data.get('content_type', 'static_post')
+            business_name = content_data.get('business_name', 'Business')
+            industry = content_data.get('industry', 'general')
+            target_audience = content_data.get('target_audience', 'our audience')
+            brand_voice = content_data.get('brand_voice', 'professional and friendly')
+            
+            caption_prompt = f"""Create a compelling social media caption for this image.
 
-            reel_script = content_data.get('reel_script', {})
-            script_lines.append(f"🎯 HOOK: {reel_script.get('hook', 'N/A')}")
-            script_lines.append("")
-            script_lines.append(f"💎 VALUE PROPOSITION: {reel_script.get('value', 'N/A')}")
-            script_lines.append("")
-            script_lines.append(f"📖 STORY: {reel_script.get('story', 'N/A')}")
-            script_lines.append("")
-            script_lines.append(f"📢 CALL TO ACTION: {reel_script.get('cta', 'N/A')}")
+IMAGE CONTEXT:
+- Topic: {topic}
+- Platform: {platform}
+- Content Type: {content_type}
+- Business: {business_name}
+- Industry: {industry}
+- Target Audience: {target_audience}
+- Brand Voice: {brand_voice}
 
-        elif content_type == 'video':
-            script_lines.append("🎥 VIDEO SCRIPT")
-            script_lines.append("=" * 30)
+REQUIREMENTS:
+1. Create an engaging caption (100-200 characters) that hooks the audience
+2. Include relevant hashtags (5-8 hashtags)
+3. Match the brand voice: {brand_voice}
+4. Optimize for {platform} algorithm
+5. Include a call-to-action if appropriate
 
-            video_script = content_data.get('video_script', {})
-            script_lines.append(f"🎬 INTRODUCTION: {video_script.get('introduction', 'N/A')}")
-            script_lines.append("")
-            script_lines.append(f"📚 MAIN CONTENT: {video_script.get('main_content', 'N/A')}")
-            script_lines.append("")
-            script_lines.append(f"🎓 EXPERT INSIGHTS: {video_script.get('expert_insights', 'N/A')}")
-            script_lines.append("")
-            script_lines.append(f"🏁 CONCLUSION: {video_script.get('conclusion', 'N/A')}")
+FORMAT (Return ONLY this format):
+CAPTION: [Your engaging caption here with emojis]
 
-        # Add technical details
-        script_lines.append("")
-        script_lines.append("=" * 60)
-        script_lines.append("TECHNICAL DETAILS:")
-        script_lines.append(f"Duration: {content_data.get('duration', 'N/A')}")
-        script_lines.append(f"Platform: {content_data.get('platform', 'N/A')}")
-        script_lines.append(f"Aspect Ratio: {content_data.get('aspect_ratio', 'N/A')}")
+Make it authentic, engaging, and optimized for maximum engagement!"""
 
-        if content_data.get('video_elements'):
-            script_lines.append(f"Video Elements: {', '.join(content_data['video_elements'])}")
+            if self.openai_client:
+                response = self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": caption_prompt}],
+                    max_tokens=300,
+                    temperature=0.8
+                )
+                caption_result = response.choices[0].message.content.strip()
+                
+                # Parse caption from response
+                caption = ""
+                for line in caption_result.split('\n'):
+                    line = line.strip()
+                    if line.startswith('CAPTION:'):
+                        caption = line.replace('CAPTION:', '').strip()
+                        break
+                
+                if not caption:
+                    # Fallback if parsing fails
+                    caption = f"Check out this amazing content about {topic}! Perfect for {target_audience} in {industry}. #Business #Success"
+                
+                logger.info(f"✅ Generated caption: {caption[:100]}...")
+                return caption
+            else:
+                # Fallback caption if OpenAI is not available
+                logger.warning("OpenAI client not available, using fallback caption")
+                return f"Exciting content about {topic} from {business_name}! Perfect for {target_audience} in {industry}. #Business #Success"
+                
+        except Exception as e:
+            logger.error(f"Error generating caption: {e}")
+            # Fallback caption
+            return f"Great content about {topic}! #Business #Success"
 
-        script_lines.append("=" * 60)
+    async def save_to_created_content(
+        self,
+        entry: Dict[str, Any],
+        content_data: Dict[str, Any],
+        user_id: str,
+        image_url: Optional[str] = None,
+        caption: Optional[str] = None
+    ):
+        """Save generated content to created_content table"""
+        try:
+            platform = entry.get('platform', 'Instagram')
+            content_type = entry.get('content_type', 'static_post')
+            topic = entry.get('topic', '')
+            entry_date = entry.get('entry_date')
+            scheduled_time = entry.get('scheduled_time')
+            
+            # Prepare data for created_content table
+            db_data = {
+                'user_id': user_id,
+                'platform': platform.lower() if platform else None,
+                'content_type': content_type.lower(),
+                'title': content_data.get('title', f"{content_data.get('business_name', 'Business')}: {topic}"),
+                'content': caption or content_data.get('content', f"Content about {topic}"),
+                'status': 'generated',
+                'channel': 'Social Media',  # Default channel
+                'hashtags': content_data.get('hashtags', []),
+                'metadata': {
+                    'calendar_entry_id': entry.get('id'),
+                    'content_theme': entry.get('content_theme'),
+                    'visual_style': entry.get('visual_style'),
+                    'topic': topic,
+                    'generated_at': datetime.now().isoformat(),
+                    'generated_by': 'content_generation_cron'
+                }
+            }
+            
+            # Add images if available
+            if image_url:
+                db_data['images'] = [image_url]
+                db_data['media_url'] = image_url  # Also set media_url field
+            
+            # Add carousel images if available
+            if content_data.get('carousel_images'):
+                carousel_urls = []
+                for carousel_item in content_data.get('carousel_images', []):
+                    if isinstance(carousel_item, dict) and carousel_item.get('image_url'):
+                        carousel_urls.append(carousel_item['image_url'])
+                    elif isinstance(carousel_item, str):
+                        carousel_urls.append(carousel_item)
+                if carousel_urls:
+                    db_data['carousel_images'] = carousel_urls
+            
+            # Add scripts if available
+            if content_data.get('reel_script'):
+                reel_script_text = self._format_reel_script(content_data.get('reel_script', {}))
+                db_data['short_video_script'] = reel_script_text
+                
+            if content_data.get('video_script'):
+                video_script_text = self._format_video_script(content_data.get('video_script', {}))
+                db_data['long_video_script'] = video_script_text
+            
+            # Add scheduling information if available
+            if entry_date:
+                db_data['scheduled_date'] = entry_date
+            if scheduled_time:
+                db_data['scheduled_time'] = scheduled_time
+            
+            # Add additional fields from content_data
+            if content_data.get('hook_type'):
+                db_data['hook_type'] = content_data.get('hook_type')
+            if content_data.get('call_to_action'):
+                db_data['call_to_action'] = content_data.get('call_to_action')
+            
+            logger.info(f"💾 Saving to created_content table with keys: {list(db_data.keys())}")
+            
+            # Insert into created_content table
+            result = self.supabase.table('created_content').insert(db_data).execute()
+            
+            if result.data and len(result.data) > 0:
+                content_id = result.data[0]['id']
+                logger.info(f"✅ Successfully saved content to created_content table with ID: {content_id}")
+                logger.info(f"📸 Images saved: {len(db_data.get('images', []))} image(s)")
+                logger.info(f"🎠 Carousel images saved: {len(db_data.get('carousel_images', []))} image(s)")
+                if db_data.get('short_video_script'):
+                    logger.info(f"🎬 Short video script saved: {len(db_data['short_video_script'])} characters")
+                if db_data.get('long_video_script'):
+                    logger.info(f"🎥 Long video script saved: {len(db_data['long_video_script'])} characters")
+            else:
+                logger.warning("Failed to save content to created_content table - no data returned")
+                
+        except Exception as e:
+            logger.error(f"Error saving content to created_content table: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
-        return "\n".join(script_lines)
+    def _format_reel_script(self, reel_script: Dict[str, Any]) -> str:
+        """Format reel script dictionary into text"""
+        script_parts = []
+        if reel_script.get('hook'):
+            script_parts.append(f"HOOK: {reel_script['hook']}")
+        if reel_script.get('value'):
+            script_parts.append(f"VALUE: {reel_script['value']}")
+        if reel_script.get('story'):
+            script_parts.append(f"STORY: {reel_script['story']}")
+        if reel_script.get('cta'):
+            script_parts.append(f"CTA: {reel_script['cta']}")
+        return "\n\n".join(script_parts) if script_parts else ""
+
+    def _format_video_script(self, video_script: Dict[str, Any]) -> str:
+        """Format video script dictionary into text"""
+        script_parts = []
+        if video_script.get('introduction'):
+            script_parts.append(f"INTRODUCTION: {video_script['introduction']}")
+        if video_script.get('main_content'):
+            script_parts.append(f"MAIN CONTENT: {video_script['main_content']}")
+        if video_script.get('expert_insights'):
+            script_parts.append(f"EXPERT INSIGHTS: {video_script['expert_insights']}")
+        if video_script.get('conclusion'):
+            script_parts.append(f"CONCLUSION: {video_script['conclusion']}")
+        return "\n\n".join(script_parts) if script_parts else ""
+
+    # Removed save_script_to_file and _format_script_content methods - scripts are now only saved to database
 
 async def main():
     """Main function to run the cron job"""
