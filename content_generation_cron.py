@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import uuid
+import sys
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from supabase import create_client, Client
@@ -132,19 +133,44 @@ class ContentGenerationCron:
                 'brand_colors': ['#007bff', '#6c757d']
             }
 
-    async def process_calendar_entries(self):
+    async def process_calendar_entries(self, user_id: Optional[str] = None):
         """Main function to process calendar entries that need content generation"""
         try:
-            logger.info("Starting content generation cron job...")
+            if user_id:
+                logger.info(f"Starting content generation cron job for specific user: {user_id}")
+            else:
+                logger.info("Starting content generation cron job for all users...")
 
-            # Query calendar_entries where content = false
-            response = self.supabase.table('calendar_entries').select(
-                'id, calendar_id, entry_date, content_type, content_theme, topic, platform, '
-                'hook_type, hook_length, tone, creativity, text_in_image, visual_style, status'
-            ).eq('content', False).execute()
+            # Build query - directly filter by user_id in calendar_entries
+            query = self.supabase.table('calendar_entries').select(
+                'id, calendar_id, user_id, entry_date, content_type, content_theme, topic, platform, '
+                'hook_type, hook_length, tone, creativity, text_in_image, visual_style, status, content'
+            ).eq('content', False)
+
+            # Filter by user if specified - directly on calendar_entries table
+            if user_id:
+                query = query.eq('user_id', user_id)
+                logger.info(f"Filtering calendar entries directly for user {user_id}")
+            else:
+                # If no user_id specified, check all entries with content=false
+                logger.info("No user_id specified, checking all calendar entries with content=false")
+
+            # Debug: First check if there are ANY entries with content=false (without user filter)
+            debug_query = self.supabase.table('calendar_entries').select('id, user_id, content').eq('content', False).limit(5).execute()
+            logger.info(f"DEBUG: Found {len(debug_query.data) if debug_query.data else 0} total entries with content=false (sample check)")
+            if debug_query.data:
+                logger.info(f"DEBUG: Sample entries - user_ids: {[e.get('user_id') for e in debug_query.data[:3]]}")
+
+            response = query.execute()
 
             if not response.data:
-                logger.info("No calendar entries found that need content generation")
+                logger.warning(f"No calendar entries found that need content generation for user {user_id if user_id else 'ALL USERS'}")
+                # Additional debug: Check if user_id column exists and has data
+                if user_id:
+                    user_check = self.supabase.table('calendar_entries').select('id, user_id, content').eq('user_id', user_id).limit(5).execute()
+                    logger.info(f"DEBUG: Found {len(user_check.data) if user_check.data else 0} total entries for this user_id (regardless of content status)")
+                    if user_check.data:
+                        logger.info(f"DEBUG: Sample entries content status: {[{'id': e.get('id'), 'content': e.get('content')} for e in user_check.data[:3]]}")
                 return
 
             logger.info(f"Found {len(response.data)} calendar entries to process")
@@ -165,17 +191,15 @@ class ContentGenerationCron:
         """Process a single calendar entry"""
         entry_id = entry['id']
         calendar_id = entry['calendar_id']
+        user_id = entry.get('user_id')
 
         logger.info(f"Processing calendar entry {entry_id} for calendar {calendar_id}")
 
-        # Get user_id from calendar
-        calendar_response = self.supabase.table('social_media_calendars').select('user_id').eq('id', calendar_id).execute()
-
-        if not calendar_response.data:
-            logger.error(f"No calendar found for calendar_id {calendar_id}")
+        # Get user_id directly from entry (no need to query social_media_calendars)
+        if not user_id:
+            logger.error(f"No user_id found in calendar entry {entry_id}")
             return
 
-        user_id = calendar_response.data[0]['user_id']
         logger.info(f"Processing for user {user_id}")
 
         # Load user profile/business context
@@ -995,9 +1019,18 @@ Make it authentic, engaging, and optimized for maximum engagement!"""
 
 async def main():
     """Main function to run the cron job"""
+    # Parse command line arguments
+    user_id = None
+    if len(sys.argv) > 1:
+        user_id = sys.argv[1]
+        logger.info(f"Running cron job for specific user: {user_id}")
+
     cron = ContentGenerationCron()
-    await cron.process_calendar_entries()
+    await cron.process_calendar_entries(user_id)
 
 if __name__ == "__main__":
     # Run the cron job
+    # Usage: python content_generation_cron.py [user_id]
+    # Example: python content_generation_cron.py "user-uuid-here"
+    # If no user_id provided, processes all users
     asyncio.run(main())
